@@ -68,7 +68,49 @@ static void apply_dt_quirks(const struct dt_quirk *quirks)
 
 #ifdef CONFIG_ARCH_DAVINCI_DA850
 
+/**
+ * Adjust the default memory settings to cope with the LCDC
+ */
+static void lcdc_prio(void *unused)
+{
+	void __iomem *cfg_mstpri1_base;
+	void __iomem *cfg_mstpri2_base;
+	void __iomem *emifb;
+	u32 val;
+
+	/*
+	 * Default master priorities in reg 0 are all lower by default than LCD
+	 * which is set below to 0. Hence don't need to change here.
+	 */
+
+	/* set EDMA30TC0 and TC1 to lower than LCDC (4 < 0) */
+	cfg_mstpri1_base = DA8XX_SYSCFG0_VIRT(DA8XX_MSTPRI1_REG);
+	val = __raw_readl(cfg_mstpri1_base);
+	val &= 0xFFFF00FF;
+	val |= 4 << 8;             /* 0-high, 7-low priority*/
+	val |= 4 << 12;            /* 0-high, 7-low priority*/
+	__raw_writel(val, cfg_mstpri1_base);
+
+	/*
+	 * Reconfigure the LCDC priority to the highest to ensure that
+	 * the throughput/latency requirements for the LCDC are met.
+	 */
+	cfg_mstpri2_base = DA8XX_SYSCFG0_VIRT(DA8XX_MSTPRI2_REG);
+
+	val = __raw_readl(cfg_mstpri2_base);
+	val &= 0x0fffffff;
+	__raw_writel(val, cfg_mstpri2_base);
+
+	/* Adjust the Peripheral Bus Burst Priority Register */
+	emifb = ioremap(DA8XX_DDR_CTL_BASE, SZ_4K);
+	if (emifb) {
+		__raw_writel(0x20, emifb + DA8XX_PBBPR_REG);
+		iounmap(emifb);
+	}
+}
+
 static const struct dt_quirk da850_dt_quirks[] __initconst = {
+	{ "ti,am33xx-tilcdc", lcdc_prio, NULL },
 	{ },
 };
 
