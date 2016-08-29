@@ -58,6 +58,7 @@
 #define LCDC_RASTER_ORDER                        BIT(8)
 #define LCDC_TFT_MODE                            BIT(7)
 #define LCDC_V1_UNDERFLOW_INT_ENA                BIT(6)
+#define LCDC_V1_SYNC_LOST                        BIT(5)
 #define LCDC_V2_UNDERFLOW_INT_ENA                BIT(5)
 #define LCDC_V1_PL_INT_ENA                       BIT(4)
 #define LCDC_V2_PL_INT_ENA                       BIT(6)
