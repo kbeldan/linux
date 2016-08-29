@@ -52,6 +52,11 @@ struct tilcdc_crtc {
 	int sync_lost_count;
 	bool frame_intact;
 	struct work_struct recover_work;
+
+	dma_addr_t p_pal_base;
+	unsigned char *v_pal_base;
+	size_t pal_sz;
+	bool pal_loaded;
 };
 #define to_tilcdc_crtc(x) container_of(x, struct tilcdc_crtc, base)
 
@@ -106,8 +111,9 @@ static void tilcdc_crtc_enable_irqs(struct drm_device *dev)
 	tilcdc_clear_irqstatus(dev, 0xffffffff);
 
 	if (priv->rev == 1) {
+		// should also enable FRAME_DONE BIT(3)
 		tilcdc_set(dev, LCDC_RASTER_CTRL_REG,
-			LCDC_V1_UNDERFLOW_INT_ENA);
+			LCDC_V1_UNDERFLOW_INT_ENA | LCDC_V1_SYNC_LOST);
 		tilcdc_set(dev, LCDC_DMA_CTRL_REG,
 			LCDC_V1_END_OF_FRAME_INT_ENA);
 	} else {
@@ -125,7 +131,7 @@ static void tilcdc_crtc_disable_irqs(struct drm_device *dev)
 	/* disable irqs that we might have enabled: */
 	if (priv->rev == 1) {
 		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG,
-			LCDC_V1_UNDERFLOW_INT_ENA | LCDC_V1_PL_INT_ENA);
+			LCDC_V1_UNDERFLOW_INT_ENA | LCDC_V1_PL_INT_ENA | LCDC_V1_SYNC_LOST);
 		tilcdc_clear(dev, LCDC_DMA_CTRL_REG,
 			LCDC_V1_END_OF_FRAME_INT_ENA);
 	} else {
@@ -163,11 +169,58 @@ static void tilcdc_crtc_enable(struct drm_crtc *crtc)
 
 	reset(crtc);
 
+#ifdef CONFIG_ARCH_DAVINCI
+	tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+	msleep(2);
+	tilcdc_clear_irqstatus(dev, tilcdc_read_irqstatus(dev));
+
+	if (!tilcdc_crtc->pal_loaded) {
+		struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+		u32 stat, reg_b, reg_c, reg_r, reg_d;
+		int i;
+
+		*(volatile u16 *)tilcdc_crtc->v_pal_base = 0x4000;
+
+		reg_b = tilcdc_read(dev, LCDC_DMA_FB_BASE_ADDR_0_REG);
+		reg_c = tilcdc_read(dev, LCDC_DMA_FB_CEILING_ADDR_0_REG);
+		reg_r = tilcdc_read(dev, LCDC_RASTER_CTRL_REG);
+		reg_d = tilcdc_read(dev, LCDC_DMA_CTRL_REG);
+
+		tilcdc_write(dev, LCDC_DMA_CTRL_REG, reg_d & ~(3<<8));
+		tilcdc_write(dev, LCDC_RASTER_CTRL_REG, reg_r & ~(BIT(2)|BIT(3)|BIT(4)|BIT(5)|BIT(6)));
+		tilcdc_write(dev, LCDC_DMA_FB_BASE_ADDR_0_REG, tilcdc_crtc->p_pal_base);
+		tilcdc_write(dev, LCDC_DMA_FB_CEILING_ADDR_0_REG,
+			     (u32)tilcdc_crtc->p_pal_base + tilcdc_crtc->pal_sz - 1);
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_PALETTE_LOAD_MODE(DATA_ONLY));
+		tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_PALETTE_LOAD_MODE(PALETTE_ONLY));
+		tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+
+		i = 100000;
+		while (!((stat = tilcdc_read_irqstatus(dev)) & LCDC_PL_LOAD_DONE) && i--)
+			udelay(5);
+		if (!(stat & LCDC_PL_LOAD_DONE)) {
+			printk(KERN_CRIT "%s:%d: Failed to load palette\n",
+			       __func__, __LINE__);
+		}
+
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+		msleep(3);
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_PALETTE_LOAD_MODE(PALETTE_ONLY));
+		tilcdc_write(dev, LCDC_DMA_FB_BASE_ADDR_0_REG, reg_b);
+		tilcdc_write(dev, LCDC_DMA_FB_CEILING_ADDR_0_REG, reg_c);
+		tilcdc_write(dev, LCDC_DMA_CTRL_REG, reg_d);
+		tilcdc_write(dev, LCDC_RASTER_CTRL_REG, reg_r);
+		tilcdc_clear_irqstatus(dev, tilcdc_read_irqstatus(dev));
+
+		tilcdc_crtc->pal_loaded = true;
+	}
+#endif
 	tilcdc_crtc_enable_irqs(dev);
 
 	tilcdc_clear(dev, LCDC_DMA_CTRL_REG, LCDC_DUAL_FRAME_BUFFER_ENABLE);
 	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_PALETTE_LOAD_MODE(DATA_ONLY));
 	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+	msleep(3);
 
 	drm_crtc_vblank_on(crtc);
 
@@ -261,6 +314,8 @@ static void tilcdc_crtc_destroy(struct drm_crtc *crtc)
 	flush_workqueue(priv->wq);
 
 	of_node_put(crtc->port);
+	dma_free_coherent(crtc->dev->dev, 512, tilcdc_crtc->v_pal_base,
+			  tilcdc_crtc->p_pal_base);
 	drm_crtc_cleanup(crtc);
 	drm_flip_work_cleanup(&tilcdc_crtc->unref_work);
 }
@@ -343,6 +398,20 @@ static void tilcdc_crtc_set_clk(struct drm_crtc *crtc)
 	struct drm_device *dev = crtc->dev;
 	struct tilcdc_drm_private *priv = dev->dev_private;
 	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+#ifdef CONFIG_ARCH_DAVINCI
+	unsigned clkdiv;
+	unsigned int rate;
+
+	rate = clk_get_rate(priv->clk);
+	tilcdc_crtc->lcd_fck_rate = rate;
+
+	clkdiv = rate / (crtc->mode.clock * 1000);
+	if (rate != clkdiv * crtc->mode.clock * 1000)
+		printk(KERN_CRIT "\n\n%s:%d: bad clk rate / divisor:\n"
+				 "mode clock rate / clock rate / div (%d, %d, %d)\n",
+				 __func__, __LINE__, crtc->mode.clock, rate, clkdiv);
+	WARN_ON(clkdiv < 1 || clkdiv > 255);
+#else
 	const unsigned clkdiv = 2; /* using a fixed divider of 2 */
 	int ret;
 
@@ -355,6 +424,7 @@ static void tilcdc_crtc_set_clk(struct drm_crtc *crtc)
 	}
 
 	tilcdc_crtc->lcd_fck_rate = clk_get_rate(priv->clk);
+#endif
 
 	DBG("lcd_clk=%u, mode clock=%d, div=%u",
 	    tilcdc_crtc->lcd_fck_rate, crtc->mode.clock, clkdiv);
@@ -729,8 +799,13 @@ irqreturn_t tilcdc_crtc_irq(struct drm_crtc *crtc)
 	uint32_t stat;
 
 	stat = tilcdc_read_irqstatus(dev);
-	tilcdc_clear_irqstatus(dev, stat);
 
+	// XXX (incorrect cf. ->enabled vs FRAME_DONE vs timeout)
+	// gross workaround to test simple modetest (ie. without vsynced page flipping)
+	if (stat & LCDC_SYNC_LOST) {
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+		tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+	}
 	if (stat & LCDC_END_OF_FRAME0) {
 		unsigned long flags;
 		bool skip_event = false;
@@ -779,11 +854,13 @@ irqreturn_t tilcdc_crtc_irq(struct drm_crtc *crtc)
 
 	/* For revision 2 only */
 	if (priv->rev == 2) {
+		// XXX should be handled in v1 too
 		if (stat & LCDC_FRAME_DONE) {
 			tilcdc_crtc->frame_done = true;
 			wake_up(&tilcdc_crtc->frame_done_wq);
 		}
 
+		// XXX should be handled in v1 too
 		if (stat & LCDC_SYNC_LOST) {
 			dev_err_ratelimited(dev->dev, "%s(0x%08x): Sync lost",
 					    __func__, stat);
@@ -805,6 +882,7 @@ irqreturn_t tilcdc_crtc_irq(struct drm_crtc *crtc)
 		tilcdc_write(dev, LCDC_END_OF_INT_IND_REG, 0);
 	}
 
+	tilcdc_clear_irqstatus(dev, stat);
 	return IRQ_HANDLED;
 }
 
@@ -819,6 +897,14 @@ struct drm_crtc *tilcdc_crtc_create(struct drm_device *dev)
 	if (!tilcdc_crtc) {
 		dev_err(dev->dev, "allocation failed\n");
 		return NULL;
+	}
+
+	tilcdc_crtc->pal_sz = 32;
+	tilcdc_crtc->v_pal_base =
+		dma_zalloc_coherent(dev->dev, 512, &tilcdc_crtc->p_pal_base,
+				    GFP_KERNEL);
+	if (WARN_ON(!tilcdc_crtc->v_pal_base)) {
+		// ... handle errors
 	}
 
 	crtc = &tilcdc_crtc->base;
