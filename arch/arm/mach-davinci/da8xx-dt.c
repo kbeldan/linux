@@ -42,11 +42,40 @@ static struct of_dev_auxdata da850_auxdata_lookup[] __initdata = {
 	{}
 };
 
+struct dt_quirk {
+	const char *compatible;
+	void (*fn)(void *);
+	void *data;
+};
+
+/**
+ * We should have an arch agnostic DT generic means to register plat specific
+ * callbacks
+ */
+static void apply_dt_quirks(const struct dt_quirk *quirks)
+{
+	while (quirks->compatible) {
+		struct device_node *np;
+		np = of_find_compatible_node(NULL, NULL, quirks->compatible);
+		if (np && quirks->fn) {
+			printk(KERN_INFO "%s: Quirk for %s\n", __func__,
+			       quirks->compatible);
+			quirks->fn(quirks->data);
+		}
+		quirks++;
+	}
+}
+
 #ifdef CONFIG_ARCH_DAVINCI_DA850
+
+static const struct dt_quirk da850_dt_quirks[] __initconst = {
+	{ },
+};
 
 static void __init da850_init_machine(void)
 {
 	of_platform_default_populate(NULL, da850_auxdata_lookup, NULL);
+	apply_dt_quirks(da850_dt_quirks);
 }
 
 static const char *const da850_boards_compat[] __initconst = {
