@@ -64,10 +64,12 @@ static void tfp410_encoder_dpms(struct drm_encoder *encoder, int mode)
 
 	if (mode == DRM_MODE_DPMS_ON) {
 		DBG("Power on");
-		gpio_direction_output(tfp410_encoder->mod->gpio, 1);
+		if (tfp410_encoder->mod->gpio > 0)
+			gpio_direction_output(tfp410_encoder->mod->gpio, 1);
 	} else {
 		DBG("Power off");
-		gpio_direction_output(tfp410_encoder->mod->gpio, 0);
+		if (tfp410_encoder->mod->gpio > 0)
+			gpio_direction_output(tfp410_encoder->mod->gpio, 0);
 	}
 
 	tfp410_encoder->dpms = mode;
