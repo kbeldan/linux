@@ -877,7 +877,9 @@ bool drm_property_change_valid_get(struct drm_property *property,
 			return true;
 
 		*ref = __drm_mode_object_find(property->dev, value,
-					      property->values[0]);
+					      property->num_values ?
+					      property->values[0] :
+					      DRM_MODE_OBJECT_ANY);
 		return *ref != NULL;
 	}
 
